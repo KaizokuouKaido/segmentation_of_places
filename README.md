@@ -1,1 +1,1 @@
-# segmentation_of_places
+# Segmentation of places in Istanbul and Izmir using Kmeans algorithm
