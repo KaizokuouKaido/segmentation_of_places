@@ -1,0 +1,259 @@
+import numpy as np
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import normalize
+from matplotlib import pyplot as plt
+import sklearn.metrics as metrics
+import plotly.graph_objects as go
+import plotly.express as px
+import seaborn as sns
+import warnings
+warnings.filterwarnings("ignore")
+%matplotlib inline
+
+# Dataframe'in okutulup verinin incelenmesi
+
+df = pd.read_excel("Case_Data_Mapin.xlsx")
+n, p = df.shape[0], df.shape[1]
+df
+
+# 3 veri grubu için 3 ayrı dataframe oluşturulup, feature isimleri ile işlemlerin yapılması
+
+df_web = df[['Web Puanı', 'Web-Kişi Sayısı Toplamı']]
+df_dynamic = df.iloc[:,7:14]
+df_static = df.iloc[:,14:]
+for i in df_static.columns:
+    df_static.rename(columns = {i:i.replace("(Nokta Çevresinde Yaşayan Kişi Sayısı)", "")}, inplace = True)
+for i in df_dynamic:
+    df_dynamic.rename(columns = {i:i.replace("(Noktaya Dışarıdan veya Çevreden Gelen Kişi Sayısı Oranı %)", "")}, inplace = True)
+df_dynamic.rename(columns = {"Dinamik Toplam (Noktaya Dışarıdan veya Çevreden Gelen Kişi Sayısı Sayısı Toplam)": "Dinamik Toplam"}, inplace = True)
+
+# Veri Gruplarındaki toplam kişi sayılarının belirlenmesi
+
+dynamic_size = df_dynamic["Dinamik Toplam"].sum() # dinamik grubundaki kişi sayısının elde edilmesi
+web_size = df_web["Web-Kişi Sayısı Toplamı"].sum() # web grubundaki kişi sayısının elde edilmesi
+df_static_t = df_static
+df_static_t['Statik Toplam'] = 0
+df_static_t['Statik Toplam'] = df_static.sum(axis=1)
+static_size = df_static_t['Statik Toplam'].sum() # Statik veri grubundaki toplam kişi sayısının elde edilmesi
+print(web_size, dynamic_size, static_size)
+
+# Dinamik Grubu NaN değerlerinin çözümlenmesi
+
+df_dynamic["Dinamik Toplam"].fillna(0, inplace=True)
+for i in range(n):
+    if df_dynamic.loc[i, "Dinamik Toplam"] == 0:
+        df_dynamic.loc[i, "Dinamik Toplam"] = round((df_static_t.loc[i, 'Statik Toplam']/df_static_t['Statik Toplam'].mean())*(df_web.loc[i, 'Web-Kişi Sayısı Toplamı']/df_web['Web-Kişi Sayısı Toplamı'].mean())*df_dynamic["Dinamik Toplam"].mean())+1000
+df_dynamic
+
+# Her grup için minimum skor belirlenmesi
+
+base_score = []
+for i in range(n):
+    if df_web.loc[i, "Web Puanı"] == 0:
+        base_score.append(round((df_static_t.loc[i, 'Statik Toplam']/df_static_t['Statik Toplam'].mean())*(df_dynamic.loc[i, 'Dinamik Toplam']/df_dynamic['Dinamik Toplam'].mean())*df_web["Web Puanı"].mean())+1)
+        df_web.loc[i, "Web Puanı"] = df_web["Web Puanı"].median()
+
+base_score = sum(base_score)/len(base_score)
+base_score = base_score*20
+
+# Web veri grubu için elbow ve silhouette metodunun uygulanması
+
+K=range(1,12)
+wss = []
+for k in K: # k değerleri için Within Sum of Squares hesaplanması
+    kmeans=KMeans(n_clusters=k,init="k-means++")
+    kmeans=kmeans.fit(df_web)
+    wss_iter = kmeans.inertia_
+    wss.append(wss_iter)
+  
+mycenters = pd.DataFrame({'Clusters' : K, 'WSS' : wss})
+mycenters
+
+sns.scatterplot(x = 'Clusters', y = 'WSS', data = mycenters, marker="+")
+
+# Silhouette Metodunun Web Grubu Verisi için Uygulanması ile ideal k değerinin teyit edilmesi
+
+for i in range(2,10): # Silhouette method hesaplama döngüsü
+    labels=KMeans(n_clusters=i,init="k-means++",random_state=200).fit(df_web).labels_
+    print ("Silhouette score for k(clusters) = "+str(i)+" is "
+           +str(metrics.silhouette_score(df_web,labels,metric="euclidean",sample_size=n,random_state=200)))
+           
+kmeans = KMeans(n_clusters=3 ,init="k-means++")
+kmeans = kmeans.fit(df_web)
+df_web['Clusters'] = kmeans.labels_
+
+# Web Grubu Cluster hiyerarşisi ile ağırlıklandırma hesabı yapılıp buna göre skor ve averaj skor elde edilmesi
+
+df_web["Score"] = df_web["Web Puanı"]
+weight_hierarchy = np.array([0.,0.,0.]) # ağırlıklandırma değerlerinin 0 olarak atanması
+for i in range(len(weight_hierarchy)): # ağırlıklandırma verilerinin hesaplanması
+    weight_hierarchy[i] = round(sum(df_web['Web-Kişi Sayısı Toplamı'][df_web["Clusters"] == i])/df_web['Web-Kişi Sayısı Toplamı'][df_web["Clusters"]==i].count())
+weight_hierarchy = normalize([weight_hierarchy], norm="max") # ağırlıklandırma verilerinin normalize edilmesi
+weight_hierarchy = np.reshape(weight_hierarchy, (3))
+
+for i in range(len(weight_hierarchy)): # web verisi için skorlandırma yapılması
+    df_web["Score"][df_web["Clusters"] == i] = base_score + (100 - weight_hierarchy[i]*base_score)
+df_web["Avg_Score"] = sum(df_web["Score"])/n # web verisi skorunun belirlenmesi
+web_score = df_web.loc[0, "Avg_Score"]
+df_web
+
+# Web Grubu clusterlar arası ilişkinin görselleştirilmesi
+
+sns.scatterplot(x="Web Puanı", y="Web-Kişi Sayısı Toplamı",hue = 'Clusters', palette="deep", data=df_web,
+                size="Web-Kişi Sayısı Toplamı", sizes=(10, 200))
+              
+# Statik veri için elbow ve silhouette metodunun uygulanması
+
+K=range(1,12)
+wss = []
+for k in K: # k değerleri için Within Sum of Squares hesaplanması
+    kmeans=KMeans(n_clusters=k,init="k-means++")
+    kmeans=kmeans.fit(df_static)
+    wss_iter = kmeans.inertia_
+    wss.append(wss_iter)
+    
+mycenters = pd.DataFrame({'Clusters' : K, 'WSS' : wss})
+mycenters
+
+sns.scatterplot(x = 'Clusters', y = 'WSS', data = mycenters, marker="+")
+
+# Silhouette Metodunun Statik Grubu Verisi için Uygulanması ile ideal k değerinin teyit edilmesi
+
+for i in range(2,10): # silhouette method döngüsü 
+    labels=KMeans(n_clusters=i,init="k-means++",random_state=200).fit(df_static).labels_
+    print ("Silhouette score for k(clusters) = "+str(i)+" is "
+           +str(metrics.silhouette_score(df_static,labels,metric="euclidean",sample_size=n,random_state=200)))
+           
+kmeans = KMeans(n_clusters=3 ,init="k-means++")
+kmeans = kmeans.fit(df_static)
+df_static['Clusters'] = kmeans.labels_
+
+# Statik Grubu Cluster hiyerarşisi ile ağırlıklandırma hesabı yapılıp buna göre skor ve averaj skor elde edilmesi
+
+df_static_w = df_static.iloc[:,:5]
+df_static_w['Clusters'] = df_static['Clusters']
+df_static_w
+
+df_static["Score"] = 0. # Ağırlık ve skor değerlerinin başlangıç değerlerini 0. olarak başlatma
+df_static["SES_weight"] = 0.
+weight_hierarchy = np.array([0.,0.,0.])
+
+cols = list(df_static_w.columns.values)
+for i in range(len(weight_hierarchy)): # Statik Grubu Cluster ağırlık hesabı
+    weight_hierarchy[i] = sum(df_static_w.loc[:, cols[i]][df_static_w["Clusters"] == i])
+weight_hierarchy = normalize([weight_hierarchy], norm="l1")
+weight_hierarchy = np.reshape(weight_hierarchy, (3))
+df_static["Clusters"] = df_static_w["Clusters"]
+
+for i in range(n): # Statik Grubu SES ağırlık hesabı
+    for j in df_static_w.columns:
+        if df_static_w.loc[i, j] == max(df_static_w.iloc[i,]):
+            df_static_w.loc[i, "SES_weight"] = cols.index(j)
+
+
+for i in range(len(weight_hierarchy)): # Statik Grubu Puanlandırma
+    df_static["Score"][df_static["Clusters"] == i] = base_score + (100-df_static_w["SES_weight"]-base_score)*weight_hierarchy[i]
+
+df_static["SES_weight"] = df_static_w["SES_weight"]
+df_static["Avg_Score"] = sum(df_static["Score"])/n # Statik Grubu averaj puan hesabı
+static_score = df_static.loc[0, "Avg_Score"]
+df_static
+
+# Statik Grubu clusterlar arası ilişkinin görselleştirilmesi
+
+df_static_graph = df_static[["Clusters", "Statik Toplam", "Score"]]
+sns.scatterplot(x = "Statik Toplam", y = "Score", hue = 'Clusters', palette="deep", data=df_static_graph,
+                size="Score", sizes=(10, 200))
+                
+# Dinamik veri grubu için SES gruplarının kişi sayılarının belirlenmesi
+
+for i in df_dynamic.iloc[:, :-1]:
+    df_dynamic[i] = round(df_dynamic[i]*df_dynamic["Dinamik Toplam"]/100)
+df_dynamic = df_dynamic.drop(["Dinamik Toplam"], axis = 1)
+
+# Dinamik veri için elbow ve silhouette metodunun uygulanması
+
+K=range(1,12)
+wss = []
+for k in K: # k değerleri için Within Sum of Squares hesaplanması
+    kmeans=KMeans(n_clusters=k,init="k-means++")
+    kmeans=kmeans.fit(df_dynamic)
+    wss_iter = kmeans.inertia_
+    wss.append(wss_iter)
+    
+mycenters = pd.DataFrame({'Clusters' : K, 'WSS' : wss})
+mycenters
+
+sns.scatterplot(x = 'Clusters', y = 'WSS', data = mycenters, marker="+")
+
+# Silhouette Metodunun Dinamik Grubu Verisi için Uygulanması ile ideal k değerinin teyit edilmesi
+
+for i in range(2,10): # silhouette method döngüsü
+    labels=KMeans(n_clusters=i,init="k-means++",random_state=200).fit(df_dynamic).labels_
+    print ("Silhouette score for k(clusters) = "+str(i)+" is "
+           +str(metrics.silhouette_score(df_dynamic,labels,metric="euclidean",sample_size=n,random_state=200)))
+           
+kmeans = KMeans(n_clusters=2 ,init="k-means++")
+kmeans = kmeans.fit(df_dynamic)
+df_dynamic['Clusters'] = kmeans.labels_
+
+df_dynamic_w = df_dynamic.iloc[:,:5]
+df_dynamic_w['Clusters'] = df_dynamic['Clusters']
+df_dynamic_w
+
+df_dynamic["Score"] = 0. # Ağırlık ve skor değerlerinin başlangıç değerlerini 0. olarak başlatma
+df_dynamic["SES_weight"] = 0.
+weight_hierarchy = np.array([0.,0.])
+
+cols = list(df_dynamic_w.columns.values)
+for i in range(len(weight_hierarchy)): # Dinamik Grubu Cluster ağırlık hesabı
+    weight_hierarchy[i] = sum(df_dynamic_w.loc[:, cols[i]][df_dynamic_w["Clusters"] == i])
+weight_hierarchy = normalize([weight_hierarchy], norm="l2") # Ağırlık Normalize etme
+weight_hierarchy = np.reshape(weight_hierarchy, (2))
+df_dynamic['Clusters'] = df_dynamic_w['Clusters']
+
+df_dynamic["Score"] = 0. # Ağırlık ve skor değerlerinin başlangıç değerlerini 0. olarak başlatma
+df_dynamic["SES_weight"] = 0.
+weight_hierarchy = np.array([0.,0.])
+
+cols = list(df_dynamic.columns.values)
+for i in range(len(weight_hierarchy)): # Dinamik Grubu Cluster ağırlık hesabı
+    weight_hierarchy[i] = sum(df_dynamic.loc[:, cols[i]][df_dynamic["Clusters"] == i])
+weight_hierarchy = normalize([weight_hierarchy], norm="max") # Ağırlık Normalize etme
+weight_hierarchy = np.reshape(weight_hierarchy, (2))
+
+for i in range(n): # Dinamik Grubu SES ağırlık hesabı
+    for j in df_dynamic.columns:
+        if df_dynamic.loc[i, j] == max(df_dynamic.iloc[i,]):
+            df_dynamic.loc[i, "SES_weight"] = cols.index(j)
+            
+for i in range(len(weight_hierarchy)): # Dinamik Grubu Puanlandırma
+    df_dynamic["Score"][df_dynamic["Clusters"] == i] = (40-df_dynamic["SES_weight"])*(weight_hierarchy[i]*2.5) 
+
+df_dynamic["Avg_Score"] = sum(df_dynamic["Score"])/n # Dinamik Grubu averaj puan hesabı
+dynamic_score = df_dynamic.loc[0, "Avg_Score"]
+df_dynamic
+
+# Dinamik Grubu clusterlar arası ilişkinin görselleştirilmesi
+
+df_dynamic_graph = df_dynamic[["Clusters", "SES_weight"]]
+df_dynamic_graph["Dinamik Toplam"] = df["Dinamik Toplam (Noktaya Dışarıdan veya Çevreden Gelen Kişi Sayısı Sayısı Toplam)"]
+sns.scatterplot(x = "SES_weight", y = "Dinamik Toplam", hue = 'Clusters', data=df_dynamic_graph,
+                size="Dinamik Toplam", sizes=(10, 200))
+                
+df_dynamic.drop(["Score", "SES_weight", "Avg_Score"], axis=1, inplace=True)
+polar=df_dynamic.groupby('Clusters').mean().reset_index() # Polar grafik
+polar=pd.melt(polar,id_vars=['Clusters'])
+fig = px.line_polar(polar, r="value", theta="variable", color='Clusters', line_close=True,height=600,width=800)
+fig.show()
+
+cols_size = np.array([dynamic_size, static_size, web_size]) # veri gruplarının toplam sayıları
+group_scores = [dynamic_score, static_score, web_score] # veri gruplarının skorları
+cols_size = normalize([cols_size], norm="l1") # veri gruplarının sayılarını normalize ederek ağırlıklandırma hesabı yapılması
+cols_size = np.reshape(cols_size, (3))
+final_score = 0
+for i in range(len(cols_size)): # final skorunun hesaplanması
+    final_score += cols_size[i]*group_scores[i]
+print(f"3 veri grubundan çıkarılan final skor : {final_score}")
+
